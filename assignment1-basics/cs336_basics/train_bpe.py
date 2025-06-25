@@ -3,11 +3,11 @@ import regex as re
 import multiprocessing as mp
 from typing import BinaryIO
 from collections import Counter
-from copy import deepcopy
+from tqdm import tqdm
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-def find_chunk_boundaries(
+def _find_chunk_boundaries(
     file: BinaryIO, 
     desired_num_chunks: int, 
     split_special_token: bytes
@@ -48,7 +48,7 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-def pre_tokenize_and_count(
+def _pre_tokenize_and_count(
         chunk: str,
         special_pattern: str, 
     ) -> dict[tuple[bytes], int]:
@@ -59,7 +59,7 @@ def pre_tokenize_and_count(
             pretoken_count[tuple(bytes([b]) for b in text.group().encode("UTF-8"))] += 1
     return pretoken_count
 
-def compute_merge(
+def _compute_merge(
     pretokenize_count: dict[tuple[bytes], int],
 ) -> tuple[dict[tuple[bytes], int], tuple[bytes, bytes]]:
     # Count each pair of tokens
@@ -87,21 +87,21 @@ def compute_merge(
         new_pretokenize_count[tuple(merged_token)] = freq
     return new_pretokenize_count, max_key
 
-def pretokenize(input_path: str, special_tokens: list[str]) -> Counter[tuple]:
+def _pretokenize(input_path: str, special_tokens: list[str]) -> Counter[tuple]:
     special_pattern = re.compile("|".join(re.escape(tok) for tok in special_tokens)) if special_tokens else None
     num_processes = mp.cpu_count()
     pool = mp.Pool(processes=num_processes)
     pretokenized_count_pool = []
     # Load in the text file
     with open(input_path, "rb") as f:
-        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+        boundaries = _find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
         # The following is a serial implementation, but you can parallelize this 
         # by sending each start/end pair to a set of processes.
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
             # Run pre-tokenization on your chunk and store the counts for each pre-token
-            pretokenized_count_pool.append(pool.apply_async(pre_tokenize_and_count, (chunk, special_pattern)))
+            pretokenized_count_pool.append(pool.apply_async(_pre_tokenize_and_count, (chunk, special_pattern)))
     pool.close(); pool.join()
     return sum([pretokenized_count.get() for pretokenized_count in pretokenized_count_pool], Counter())
 
@@ -117,10 +117,18 @@ def train_bpe(
     initial_tokens = [x.encode("UTF-8") for x in special_tokens] + [bytes([x]) for x in range(256)]
     vocab: dict[int, bytes] = {i: x for i,x in enumerate(initial_tokens)}  # index -> bytes
     # Pretokenize and get paircount
-    pretokenize_count = pretokenize(input_path=input_path, special_tokens=special_tokens)
+    pretokenize_count = _pretokenize(input_path=input_path, special_tokens=special_tokens)
     # Merge loop
+    pbar = tqdm(total=vocab_size)
+    pbar.update(len(vocab))
     while len(vocab) < vocab_size:
-        pretokenize_count, merge = compute_merge(pretokenize_count=pretokenize_count)
+        pretokenize_count, merge = _compute_merge(pretokenize_count=pretokenize_count)
         merges.append(merge)
         vocab[len(vocab)] = merge[0] + merge[1]
+        pbar.update(1)
     return vocab, merges
+
+if __name__ == "__main__":
+    vocab, merges = train_bpe("data/TinyStoriesV2-GPT4-train.txt", 10_000, ['<|endoftext|>'])
+    print(vocab)
+    print(merges)
