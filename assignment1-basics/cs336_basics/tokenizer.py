@@ -2,6 +2,8 @@ import pickle
 import regex as re
 from typing import Iterable, Iterator
 
+from cs336_basics.utils.tokenizer import PAT
+
 class Tokenizer:
     def __init__(
         self, 
@@ -10,8 +12,23 @@ class Tokenizer:
         special_tokens: list[str] | None = None
     ) -> None:
         self.vocab = vocab
+        self.reverse_vocab = {v:k for k,v in self.vocab.items()}
         self.merges = merges
         self.special_tokens = special_tokens
+        # Add special tokens to dictionary if necissary
+        if special_tokens:
+            self.special_tokens = sorted(special_tokens, key=len, reverse=True)
+            self.special_pattern = "(" + "|".join(re.escape(k) for k in self.special_tokens) + ")"
+            vocab_size = len(self.vocab)
+            for tok in special_tokens:
+                tok = tok.encode("UTF-8")
+                if tok not in self.reverse_vocab.keys():
+                    self.vocab[vocab_size] = tok
+                    self.reverse_vocab[tok] = vocab_size
+                    vocab_size += 1
+        else:
+            self.special_tokens = None
+            self.special_pattern = None 
     
     @classmethod
     def from_files(
@@ -20,8 +37,10 @@ class Tokenizer:
         merges_filepath: str, 
         special_tokens: list[str] | None = None,
     ) -> "Tokenizer":
-        vocab = pickle.load(vocab_filepath)
-        merges = pickle.load(merges_filepath)
+        with open(vocab_filepath, "rb") as handle:
+            vocab = pickle.load(handle)
+        with open(merges_filepath, "rb") as handle:
+            merges = pickle.load(handle)
         return Tokenizer(vocab, merges, special_tokens)
     
     def _merge_pretoken(self, pretoken: str) -> list[int]:
@@ -40,6 +59,7 @@ class Tokenizer:
                 break
             merge_key = self.merges[merge_index]
             new_pretoken = []
+            i = 0
             while i < len(pretoken) - 1:
                 if (pretoken[i], pretoken[i+1]) == merge_key:
                     new_pretoken.append(pretoken[i] + pretoken[i+1])
@@ -55,16 +75,33 @@ class Tokenizer:
     
     def encode(self, text: str) -> list[int]:
         # Pretokenize
-        special_pattern = re.compile("|".join(re.escape(tok) for tok in self.special_tokens)) if self.special_tokens else None
-        pretokenized_text = special_pattern.split(text) if special_pattern else [text]
+        pretokenized_text = special_chunks = re.split(self.special_pattern, text) if self.special_pattern else [text]
         # Merge pretokens and encode into input ids
         input_ids = []
-        for pretoken in pretokenized_text:
-            input_ids += [self.vocab[tok] for tok in self._merge_pretoken(pretoken)]
+        for chunk in pretokenized_text:
+            # Check if special token
+            if self.special_pattern is not None and chunk in self.special_tokens:
+                input_ids.append(self.reverse_vocab[chunk.encode("UTF-8")])
+                continue
+            # Normal logic if not special token
+            for pretoken in re.finditer(PAT, chunk):
+                input_ids += [self.reverse_vocab[tok] for tok in self._merge_pretoken(pretoken.group())]
         return input_ids
     
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        ...
+        raise NotImplementedError
     
     def decode(self, ids: list[int]) -> str:
-        return sum([self.vocab[id] for id in ids], "").decode("UTF-8")
+        return b"".join([self.vocab[id] for id in ids]).decode("UTF-8", errors="replace")
+
+
+if __name__ == "__main__":
+    tokenizer = Tokenizer.from_files(
+       vocab_filepath="state_dicts/tinystories_v2_tokenizer_vocab.pkl", 
+       merges_filepath="state_dicts/tinystories_v2_tokenizer_merges.pkl",
+       special_tokens=["<|endoftext|>", "<|endoftext|><|endoftext|>"],
+    )
+    encodings = tokenizer.encode("Hello, how <|endoftext|><|endoftext|> are you?<|endoftext|>")
+    print(encodings)
+    text = tokenizer.decode(encodings)
+    print(text)

@@ -163,3 +163,4 @@ cython_debug/
 *.zip
 
 assignment1-basics/data
+assignment1-basics/state_dicts

@@ -1,11 +1,14 @@
 import os
+import pickle
 import regex as re
 import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 from typing import BinaryIO
 from collections import Counter
 from tqdm import tqdm
 
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+from cs336_basics.utils.tokenizer import PAT
+
 
 def _find_chunk_boundaries(
     file: BinaryIO, 
@@ -90,20 +93,21 @@ def _compute_merge(
 def _pretokenize(input_path: str, special_tokens: list[str]) -> Counter[tuple]:
     special_pattern = re.compile("|".join(re.escape(tok) for tok in special_tokens)) if special_tokens else None
     num_processes = mp.cpu_count()
-    pool = mp.Pool(processes=num_processes)
     pretokenized_count_pool = []
     # Load in the text file
     with open(input_path, "rb") as f:
         boundaries = _find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-        # The following is a serial implementation, but you can parallelize this 
-        # by sending each start/end pair to a set of processes.
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-            pretokenized_count_pool.append(pool.apply_async(_pre_tokenize_and_count, (chunk, special_pattern)))
-    pool.close(); pool.join()
-    return sum([pretokenized_count.get() for pretokenized_count in pretokenized_count_pool], Counter())
+        with ProcessPoolExecutor(num_processes) as executor:
+            # The following is a serial implementation, but you can parallelize this 
+            # by sending each start/end pair to a set of processes.
+            futures = []
+            for start, end in zip(boundaries[:-1], boundaries[1:]):
+                f.seek(start)
+                chunk = f.read(end - start).decode("utf-8", errors="ignore")
+                # Run pre-tokenization on your chunk and store the counts for each pre-token
+                futures.append(executor.submit(_pre_tokenize_and_count, chunk, special_pattern))
+            pretokenized_count_pool = [future.result() for future in futures]
+    return sum(pretokenized_count_pool, Counter())
 
 
 def train_bpe(
@@ -128,7 +132,20 @@ def train_bpe(
         pbar.update(1)
     return vocab, merges
 
+def _save_module(path, obj):
+    with open(path, "wb") as handle:
+        pickle.dump(obj, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
 if __name__ == "__main__":
-    vocab, merges = train_bpe("data/TinyStoriesV2-GPT4-train.txt", 10_000, ['<|endoftext|>'])
-    print(vocab)
-    print(merges)
+    # Tiny Stories V2 Test Tokenizer Train
+    # vocab, merges = train_bpe("data/TinyStoriesV2-GPT4-valid.txt", 10_000, ['<|endoftext|>'])
+    # _save_module("state_dicts/tinystories_v2_test_tokenizer_vocab.pkl", vocab)
+    # _save_module("state_dicts/tinystories_v2_test_tokenizer_merges.pkl", merges)
+    # Tiny Stories V2 Tokenizer Train
+    # vocab, merges = train_bpe("data/TinyStoriesV2-GPT4-train.txt", 10_000, ['<|endoftext|>'])
+    # _save_module("state_dicts/tinystories_v2_tokenizer_vocab.pkl", vocab)
+    # _save_module("state_dicts/tinystories_v2_tokenizer_merges.pkl", merges)
+    # Open Web Text Train
+    vocab, merges = train_bpe("data/owt_train.txt", 32_000, ['<|endoftext|>'])
+    _save_module("state_dicts/train_bpe_expts_owt.pkl", vocab)
+    _save_module("state_dicts/train_bpe_expts_owt.pkl", merges)
