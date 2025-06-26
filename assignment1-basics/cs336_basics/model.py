@@ -94,6 +94,44 @@ class SwiGLU(torch.nn.Module):
     ) -> torch.Tensor:
         return self.weight2(self.weight3(x) * silu(self.weight1(x)))
 
+class RoPE(torch.nn.Module):
+    def __init__(
+        self,
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: torch.device | None = None,
+        dtype: torch.device | None = None,
+    ) -> None:
+        super().__init__()
+        positions = torch.arange(max_seq_len, device=device)[:, None]
+        freqs = torch.arange(0, d_k, 2, device=device) / d_k
+        inv_freq = 1.0 / (theta**freqs)
+        angles = positions * inv_freq
+
+        self.register_buffer("cos", torch.cos(angles).to(dtype), persistent=False)
+        self.register_buffer("sin", torch.sin(angles).to(dtype), persistent=False)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        sin = self.sin[token_positions]
+        cos = self.cos[token_positions]
+        x_even = x[..., 0::2]
+        x_odd = x[..., 1::2]
+        x_rot_even = x_even * cos - x_odd * sin 
+        x_rot_odd = x_even * sin + x_odd * cos 
+        x_rot = einx.rearrange("..., ... -> ... (1 + 1)", x_rot_even, x_rot_odd)
+        return einx.rearrange("... d1 d2 -> ... (d1 d2)", x_rot)
+
+
+def softmax(x: torch.Tensor) -> torch.Tensor:
+    max_val = torch.max(x, dim=-1, keepdim=True).values
+    exp_x = (x - max_val).exp()
+    return exp_x / torch.sum(exp_x, dim=-1, keepdim=True)
+
 
 if __name__ == "__main__":
     # x = torch.ones(128)
