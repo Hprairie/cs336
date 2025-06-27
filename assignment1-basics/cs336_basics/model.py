@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import einx
+import math
 
 
 class Linear(torch.nn.Module):
@@ -101,7 +102,7 @@ class RoPE(torch.nn.Module):
         d_k: int,
         max_seq_len: int,
         device: torch.device | None = None,
-        dtype: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         positions = torch.arange(max_seq_len, device=device)[:, None]
@@ -109,8 +110,8 @@ class RoPE(torch.nn.Module):
         inv_freq = 1.0 / (theta**freqs)
         angles = positions * inv_freq
 
-        self.register_buffer("cos", torch.cos(angles).to(dtype), persistent=False)
-        self.register_buffer("sin", torch.sin(angles).to(dtype), persistent=False)
+        self.register_buffer("cos", torch.cos(angles).to(dtype=dtype), persistent=False)
+        self.register_buffer("sin", torch.sin(angles).to(dtype=dtype), persistent=False)
     
     def forward(
         self,
@@ -128,9 +129,54 @@ class RoPE(torch.nn.Module):
 
 
 def softmax(x: torch.Tensor) -> torch.Tensor:
-    max_val = torch.max(x, dim=-1, keepdim=True).values
+    max_val = torch.max(x, dim=-1, keepdim=True).values # This is a bug in pytorch
     exp_x = (x - max_val).exp()
     return exp_x / torch.sum(exp_x, dim=-1, keepdim=True)
+
+def scaled_dot_product_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    mask: torch.Tensor | None,
+) -> torch.Tensor:
+    innerproduct = einx.dot("b ... q d, b ... k d -> b ... q k", query, key) / math.sqrt(key.shape[-1])
+    masked_innerproduct = torch.where(mask, innerproduct, float("-inf")) if mask is not None else innerproduct
+    return einx.dot("b ... l v, b ... v d -> b ... l d", softmax(masked_innerproduct), value)
+
+class MultiHeadAttention(torch.nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        theta: float | None = None,
+        max_seq_len: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        assert self.d_k * self.num_heads == d_model
+        self.qkv = Linear(d_model, 3 * d_model, device=device, dtype=dtype)
+        self.out = Linear(d_model, d_model, device=device, dtype=dtype)
+        if theta is not None and max_seq_len is not None:
+            self.rope = RoPE(theta=theta, d_k=self.d_k, max_seq_len=max_seq_len, device=device, dtype=dtype)
+        else:
+            self.rope = None
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        seq_len = x.shape[-2]
+        batch = x.shape[0::-2]
+        q, k, v = einx.rearrange("... l ((1 + 1 + 1) h d) -> ... h l d, ... h l d, ... h l d", self.qkv(x), h=self.num_heads, d=self.d_k)
+        if self.rope is not None:
+            assert token_positions is not None
+            q, k = self.rope(q, token_positions), self.rope(k, token_positions)
+        out = scaled_dot_product_attention(q,k,v, mask=torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
+        return self.out(einx.rearrange("... h l d -> ... l (h d)", out))
 
 
 if __name__ == "__main__":
