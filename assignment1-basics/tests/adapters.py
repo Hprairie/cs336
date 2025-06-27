@@ -92,9 +92,9 @@ def run_swiglu(
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
     layer = SwiGLU(d_model, d_ff)
-    layer.weight1.weight.data = w1_weight
-    layer.weight2.weight.data = w2_weight
-    layer.weight3.weight.data = w3_weight
+    layer.w1.weight.data = w1_weight
+    layer.w2.weight.data = w2_weight
+    layer.w3.weight.data = w3_weight
     return layer(in_features)
 
 
@@ -292,6 +292,14 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
+    weights["attn.qkv.weight"] = einx.rearrange("... a d, ... b d, ... c d -> ... (a + b + c) d",weights["attn.q_proj.weight"], weights["attn.k_proj.weight"], weights["attn.v_proj.weight"])
+    weights.pop("attn.q_proj.weight")
+    weights.pop("attn.k_proj.weight")
+    weights.pop("attn.v_proj.weight")
+    weights["attn.out.weight"] = weights.pop("attn.output_proj.weight")
+    layer = TransformerBlock(d_model, num_heads, d_ff, theta, max_seq_len)
+    layer.load_state_dict(weights)
+    return layer(in_features)
     raise NotImplementedError
 
 
@@ -374,7 +382,21 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    weights["token_embeddings.embeddings"] = weights.pop("token_embeddings.weight")
+    for i in range(num_layers):
+        weights[f"layers.{i}.attn.qkv.weight"] = einx.rearrange("... a d, ... b d, ... c d -> ... (a + b + c) d",weights.pop(f"layers.{i}.attn.q_proj.weight"), weights.pop(f"layers.{i}.attn.k_proj.weight"), weights.pop(f"layers.{i}.attn.v_proj.weight"))
+        weights[f"layers.{i}.attn.out.weight"] = weights.pop(f"layers.{i}.attn.output_proj.weight")
+    model = TransformerLM(
+        d_model,
+        num_heads,
+        d_ff,
+        vocab_size, 
+        context_length, 
+        num_layers,
+        rope_theta,
+    )
+    model.load_state_dict(weights)
+    return model(in_indices)
 
 
 def run_rmsnorm(
