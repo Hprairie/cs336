@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import einx
-import math
+
+from cs336_basics.functional import silu, softmax, scaled_dot_product_attention
 
 
 class Linear(torch.nn.Module):
@@ -73,9 +74,6 @@ class RMSNorm(torch.nn.Module):
             return torch.rsqrt(torch.mean(input ** 2) + self.eps) * input * self.weight
         return einx.vmap("... [a] -> ... [a] ", x, op=_rms_op)
 
-def silu(x: torch.Tensor) -> torch.Tensor:
-    return x * torch.sigmoid(x)
-
 class SwiGLU(torch.nn.Module):
     def __init__(
         self,
@@ -127,21 +125,6 @@ class RoPE(torch.nn.Module):
         x_rot = einx.rearrange("..., ... -> ... (1 + 1)", x_rot_even, x_rot_odd)
         return einx.rearrange("... d1 d2 -> ... (d1 d2)", x_rot)
 
-
-def softmax(x: torch.Tensor) -> torch.Tensor:
-    max_val = torch.max(x, dim=-1, keepdim=True).values # This is a bug in pytorch
-    exp_x = (x - max_val).exp()
-    return exp_x / torch.sum(exp_x, dim=-1, keepdim=True)
-
-def scaled_dot_product_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    mask: torch.Tensor | None,
-) -> torch.Tensor:
-    innerproduct = einx.dot("b ... q d, b ... k d -> b ... q k", query, key) / math.sqrt(key.shape[-1])
-    masked_innerproduct = torch.where(mask, innerproduct, float("-inf")) if mask is not None else innerproduct
-    return einx.dot("b ... l v, b ... v d -> b ... l d", softmax(masked_innerproduct), value)
 
 class MultiHeadAttention(torch.nn.Module):
     def __init__(
