@@ -2,9 +2,13 @@ import torch
 import einx
 import math
 
-def softmax(x: torch.Tensor) -> torch.Tensor:
+def softmax(x: torch.Tensor, temperature: float | None = None) -> torch.Tensor:
     max_val = torch.max(x, dim=-1, keepdim=True).values # This is a bug in pytorch
-    exp_x = (x - max_val).exp()
+    if temperature is not None:
+        exp_x = (x - max_val) / temperature
+        exp_x = exp_x.exp()
+    else:
+        exp_x = (x - max_val).exp()
     return exp_x / torch.sum(exp_x, dim=-1, keepdim=True)
 
 def scaled_dot_product_attention(
