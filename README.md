@@ -14,6 +14,7 @@ Most assignments have a compute costly / compute minimal costs. Everything is im
     - [x] Part 2: Tokenizer
     - [x] Part 3: Language Model
     - [x] Part 4: Training Requirements
+    - [ ] Part 5: Training Loop
     - [ ] Part 6: Generating Text
     - [ ] Part 7: Experiments
 - [ ] Assignment 2: Systems and Parallelism

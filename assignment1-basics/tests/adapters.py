@@ -17,6 +17,7 @@ from cs336_basics.losses import *
 from cs336_basics.optimizers import *
 from cs336_basics.lr_schedule import *
 from cs336_basics.gradient_clipping import *
+from cs336_basics.data_loader import *
 
 
 
@@ -462,7 +463,7 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    return data_loader(dataset, batch_size, context_length, device = torch.device(device))
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
