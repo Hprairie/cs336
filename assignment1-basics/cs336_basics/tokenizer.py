@@ -94,6 +94,9 @@ class Tokenizer:
     
     def decode(self, ids: list[int]) -> str:
         return b"".join([self.vocab[id] for id in ids]).decode("UTF-8", errors="replace")
+    
+    def get_vocab_size(self) -> int:
+        return len(self.vocab)
 
 
 if __name__ == "__main__":
