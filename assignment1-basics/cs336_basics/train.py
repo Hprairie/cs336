@@ -9,11 +9,11 @@ from argparse import Namespace
 from cs336_basics.checkpointing import load_checkpoint, save_checkpoint
 from cs336_basics.model import TransformerLM
 from cs336_basics.optimizers import AdamW, SGD
-from cs336_basics.lr_schedule import lr_cosine_schedule
+from cs336_basics.lr_schedule import CosineAnnealing
 from cs336_basics.tokenizer import Tokenizer 
 from cs336_basics.losses import cross_entropy_loss
 from cs336_basics.gradient_clipping import clip_gradients
-from cs336_basics.data_loader import data_loader
+from cs336_basics.data_loader import DataLoader, RandomSampler, OrderedSampler
 from cs336_basics.logger import WandbLogger
 
 from cs336_basics.utils.parser import ParseKVAction
@@ -55,13 +55,17 @@ def tokenize_and_cache(cfg, tokenizer: Tokenizer, path: os.PathLike, logger: Wan
     return np.memmap(cache_path, dtype=np.int16, mode="r")
     
 
-def get_lr_schedule(cfg: Namespace):
-    return
+def get_lr_schedule(cfg: Namespace, optimizer: torch.optim.Optimizer):
+    match cfg.lr_schedule:
+        case "cosine":
+            return CosineAnnealing(optimizer=optimizer, a_max=cfg.lr_max, a_min=cfg.lr_min, T_w=cfg.lr_schedule_vals["warmup"], T_c=cfg.train_steps)
+        case _:
+            raise ValueError(f"Unknown LR Schedule: {cfg.lr_schedule}")
 
 def get_optimizer(cfg: Namespace, model: torch.nn.Module) -> torch.optim.Optimizer:
     match cfg.optimizer:
         case "adamw":
-            return AdamW(model, cfg.lr)
+            return AdamW(model, cfg.max_lr)
         case _:
             raise ValueError(f"Unknown Optimizer: {cfg.optimizer}")
 
@@ -82,9 +86,6 @@ def validation(cfg, model: TransformerLM, data, logger: WandbLogger, device: tor
                 y = y.to(device=device)
             
             outputs = model(x)
-
-
-    
 
 def train(cfg: Namespace) -> None:
     assert not os.path.exists(os.path.join(cfg.run_dir, cfg.run_name)), "Experiment all ready exists. Please change run name."
@@ -111,8 +112,8 @@ def train(cfg: Namespace) -> None:
     )
 
     criterion = cross_entropy_loss
-    lr_schedule = get_lr_schedule(cfg=cfg)
     optimizer = get_optimizer(cfg=cfg, model=model)
+    lr_schedule = get_lr_schedule(cfg=cfg, optimizer=optimizer)
 
     train_data = tokenize_and_cache(cfg=cfg, tokenizer=tokenizer, path=cfg.train_data_path, logger=logger)
     val_data = tokenize_and_cache(cfg=cfg, tokenizer=tokenizer, path=cfg.train_data_path, logger=logger)
@@ -120,12 +121,15 @@ def train(cfg: Namespace) -> None:
     save_path = os.path.join(cfg.run_dir, cfg.run_name, "checkpoints")
     os.makedirs(save_path, exist_ok=True)
 
+    # Create the dataloaders
+
     # Main training loop
-    for step in range(cfg.step_count):
+    for step in range(cfg.train_steps):
         x, y = data_loader(train_data, cfg.batch_size, cfg.context_length, device=device)
         logits = model(x)
         loss = criterion(logits, y)
         loss.backward()
+        lr_schedule.step(t=step)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -172,7 +176,7 @@ def parse_args() -> Namespace:
     parser.add_argument("--val-data-path", type=os.PathLike, default="data/")
     parser.add_argument("--cache-path", type=os.PathLike, default="tokenized_data/")
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--step-count", type=int, default=2_000)
+    parser.add_argument("--train-steps", type=int, default=2_000)
     parser.add_argument("--save-steps", type=int, default=100)
     parser.add_argument("--eval-steps", type=int, default=100)
 
