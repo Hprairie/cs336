@@ -3,7 +3,7 @@ import torch
 import argparse
 import numpy as np
 
-
+from tqdm import tqdm
 from argparse import Namespace
 
 from cs336_basics.checkpointing import load_checkpoint, save_checkpoint
@@ -26,7 +26,7 @@ def tokenize_and_cache(cfg, tokenizer: Tokenizer, path: os.PathLike, logger: Wan
     cache_path = os.path.join(cfg.cache_path, f"{name}.npy")
     if os.path.exists(cache_path):
         logger.log(f"Loading from cache file {cache_path}")
-        return np.memmap(cache_path, dtype=np.int32)
+        return np.memmap(cache_path, dtype=np.int16, mode="r")
     
     # Determine compression ratio to calculate expected number of bytes to allocate
     file_size = os.path.getsize(path)
@@ -34,24 +34,25 @@ def tokenize_and_cache(cfg, tokenizer: Tokenizer, path: os.PathLike, logger: Wan
         sample = f.read(SAMPLE_SIZE)
     input_ids = tokenizer.encode(sample.decode("UTF-8", errors="replace"))
     ratio = len(sample) / len(input_ids)
-
     # Allocate memory for tensors
     data = np.memmap(
         cache_path,
         dtype=np.uint16,
+        mode="w+",
         shape=(int(file_size / ratio),)
     )
-    
     # Tokenize that dataset
-    tokenized_text = []
+    idx = 0
     with open(path) as f:
-        for ids in tokenizer.encode_iterable(f):
-            tokenized_text.append(ids)
-    
-    # Truncate dataset to correct size
-    tokenized_text = np.array(tokenized_text)
+        for ids in tqdm(tokenizer.encode_iterable(f)):
+            data[idx] = ids
+            idx += 1
     data.flush()
-    return data
+    data._mmap.close()
+    # Truncate the file to the real size (2 bytes per token)
+    with open(cache_path, "r+b") as f:
+        f.truncate(idx * 2)
+    return np.memmap(cache_path, dtype=np.int16, mode="r")
     
 
 def get_lr_schedule(cfg: Namespace):
@@ -63,9 +64,30 @@ def get_optimizer(cfg: Namespace, model: torch.nn.Module) -> torch.optim.Optimiz
             return AdamW(model, cfg.lr)
         case _:
             raise ValueError(f"Unknown Optimizer: {cfg.optimizer}")
+
+def validation(cfg, model: TransformerLM, data, logger: WandbLogger, device: torch.device):
+    model.eval()
+
+    with torch.no_grad():
+        for idx in range(0, len(data), cfg.batch_size):
+            x = data[idx:max(idx + cfg.batch_size, len(data) - 1)]
+            y = data[idx+1:max(idx + cfg.batch_size + 1, len(data))]
+
+            x, y = torch.from_numpy(x), torch.from_numpy(y)
+            if device.type == "cuda":
+                x = x.pin_memory().to(device=device, non_blocking=True)
+                y = y.pin_memory().to(device=device, non_blocking=True)
+            else:
+                x = x.to(device=device)
+                y = y.to(device=device)
+            
+            outputs = model(x)
+
+
     
 
 def train(cfg: Namespace) -> None:
+    assert not os.path.exists(os.path.join(cfg.run_dir, cfg.run_name)), "Experiment all ready exists. Please change run name."
     # Setup device, logger, and dump info
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     logger = WandbLogger(cfg)
@@ -92,20 +114,37 @@ def train(cfg: Namespace) -> None:
     lr_schedule = get_lr_schedule(cfg=cfg)
     optimizer = get_optimizer(cfg=cfg, model=model)
 
-    data = ...
+    train_data = tokenize_and_cache(cfg=cfg, tokenizer=tokenizer, path=cfg.train_data_path, logger=logger)
+    val_data = tokenize_and_cache(cfg=cfg, tokenizer=tokenizer, path=cfg.train_data_path, logger=logger)
+
+    save_path = os.path.join(cfg.run_dir, cfg.run_name, "checkpoints")
+    os.makedirs(save_path, exist_ok=True)
 
     # Main training loop
     for step in range(cfg.step_count):
-        x, y = data_loader(data, cfg.batch_size, cfg.context_length, device=device)
+        x, y = data_loader(train_data, cfg.batch_size, cfg.context_length, device=device)
         logits = model(x)
         loss = criterion(logits, y)
         loss.backward()
         optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        if step % cfg.eval_steps == 0:
+            validation(cfg=cfg, model=model, data=val_data, logger=logger, device=device)
+        
+        if step % cfg.save_steps == 0:
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                iteration=step,
+                out=os.path.join(save_path, f"checkpoint_{step}.pth")
+            )
 
 
 def parse_args() -> Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", type=os.PathLike, default="runs/")
+    parser.add_argument("--run-name", type=str, required=True)
     parser.add_argument("--tokenizer", type=os.PathLike, default="tokenizer/")
 
     parser.add_argument("--d-model", type=int, default=256)
@@ -134,6 +173,8 @@ def parse_args() -> Namespace:
     parser.add_argument("--cache-path", type=os.PathLike, default="tokenized_data/")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--step-count", type=int, default=2_000)
+    parser.add_argument("--save-steps", type=int, default=100)
+    parser.add_argument("--eval-steps", type=int, default=100)
 
     parser.add_argument("--wandb-entity", type="str")
     parser.add_argument("--wandb-project", type="str")
