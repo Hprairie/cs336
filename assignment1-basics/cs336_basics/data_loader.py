@@ -78,7 +78,7 @@ class DataLoader:
         self.steps = steps
         self.sampler = sampler
         self.pin_memory = pin_memory
-        self.drop_last = drop_last
+        self.drop_last = drop_last # This is pretty much always done as we aren't that advanced
         assert isinstance(device, torch.device), "Must be a valid torch device"
         self.device = device
         assert isinstance(dtype, torch.dtype), "Must be a valid torch dtype"
@@ -96,7 +96,10 @@ class DataLoader:
         return self
     
     def __next__(self):
-        if self.steps
+        # If none then do a single pass over the data
+        if self.steps is None:
+            self.sampler.refresh()
+            self.steps  = len(self.sampler)
         if self.idx < self.steps:
             # Check is sampler still has available samples
             if not len(self.sampler):

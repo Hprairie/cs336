@@ -69,23 +69,16 @@ def get_optimizer(cfg: Namespace, model: torch.nn.Module) -> torch.optim.Optimiz
         case _:
             raise ValueError(f"Unknown Optimizer: {cfg.optimizer}")
 
-def validation(cfg, model: TransformerLM, data, logger: WandbLogger, device: torch.device):
+def validation(cfg, model: TransformerLM, data: DataLoader, criterion, logger: WandbLogger, device: torch.device):
     model.eval()
 
     with torch.no_grad():
-        for idx in range(0, len(data), cfg.batch_size):
-            x = data[idx:max(idx + cfg.batch_size, len(data) - 1)]
-            y = data[idx+1:max(idx + cfg.batch_size + 1, len(data))]
-
-            x, y = torch.from_numpy(x), torch.from_numpy(y)
-            if device.type == "cuda":
-                x = x.pin_memory().to(device=device, non_blocking=True)
-                y = y.pin_memory().to(device=device, non_blocking=True)
-            else:
-                x = x.to(device=device)
-                y = y.to(device=device)
-            
+        for x, y in data:
             outputs = model(x)
+            loss = criterion(outputs, y)
+
+            logger.log()
+
 
 def train(cfg: Namespace) -> None:
     assert not os.path.exists(os.path.join(cfg.run_dir, cfg.run_name)), "Experiment all ready exists. Please change run name."
@@ -122,10 +115,38 @@ def train(cfg: Namespace) -> None:
     os.makedirs(save_path, exist_ok=True)
 
     # Create the dataloaders
+    train_dataloader = DataLoader(
+        train_data,
+        sampler=RandomSampler(
+            context_length=cfg.context_length,
+            dataset_size=len(train_data),
+        ),
+        steps=cfg.train_steps,
+        batch_size=cfg.batch_size,
+        context_length=cfg.contex_length,
+        pin_memory=True,
+        drop_last=False, # This Does nothing rn
+        device=device,
+        dtype=torch.bfloat16,
+    )
+
+    val_dataloader = DataLoader(
+        val_data,
+        sampler=OrderedSampler(
+            context_length=cfg.context_length,
+            dataset_size=len(val_data),
+        ),
+        batch_size=cfg.batch_size,
+        context_length=cfg.contex_length,
+        pin_memory=True,
+        drop_last=False, # This Does nothing rn
+        device=device,
+        dtype=torch.bfloat16,
+
+    )
 
     # Main training loop
-    for step in range(cfg.train_steps):
-        x, y = data_loader(train_data, cfg.batch_size, cfg.context_length, device=device)
+    for step, (x, y) in enumerate(train_dataloader):
         logits = model(x)
         loss = criterion(logits, y)
         loss.backward()
@@ -134,7 +155,14 @@ def train(cfg: Namespace) -> None:
         optimizer.zero_grad(set_to_none=True)
 
         if step % cfg.eval_steps == 0:
-            validation(cfg=cfg, model=model, data=val_data, logger=logger, device=device)
+            validation(
+                cfg=cfg,
+                model=model,
+                data=val_dataloader,
+                criterion=criterion,
+                logger=logger,
+                device=device
+            )
         
         if step % cfg.save_steps == 0:
             save_checkpoint(
