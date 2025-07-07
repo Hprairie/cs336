@@ -63,3 +63,11 @@ To submit, run `./test_and_make_submission.sh` . This script will install your
 code's dependencies, run tests, and create a gzipped tarball with the output. We
 should be able to unzip your submitted tarball and run
 `./test_and_make_submission.sh` to verify your test results.
+
+## Arch extras:
+
+Install nsight-systems for nsys cli tool:
+
+```bash
+yay -S nsight-systems
+```

@@ -1,12 +1,20 @@
+import math
 import argparse
 import timeit
 import torch
 import numpy as np
 
 from argparse import Namespace
+from torch.cuda import nvtx
+from torch import Tensor
+from jaxtyping import Float, Bool
+from einops import einsum
 
-from cs336_basics.model import BasicsTransformerLM
+import cs336_basics
+
+from cs336_basics.model import BasicsTransformerLM, softmax
 from cs336_basics.nn_utils import cross_entropy
+from cs336_basics.optimizer import AdamW
 
 configs = {
     "small": {
@@ -21,12 +29,45 @@ configs = {
 }
 
 
+@nvtx.range("scaled dot product attention")
+def annotated_scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys    d_k"],
+    V: Float[Tensor, " ... keys    d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    d_k = K.shape[-1]
+    with nvtx.range("computing attention scores"):
+        attention_scores = einsum(
+            Q, K, "... query d_k, ... key d_k -> ... query key"
+        ) / math.sqrt(d_k)
+
+        if mask is not None:
+            attention_scores = torch.where(mask, attention_scores, float("-inf"))
+
+    with nvtx.range("computing softmax"):
+        attention_weights = softmax(
+            attention_scores, dim=-1
+        )  # Softmax over the key dimension
+
+    with nvtx.range("final matmul"):
+        final = einsum(
+            attention_weights, V, "... query key, ... key d_v ->  ... query d_v"
+        )
+
+    return final
+
+
+cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+
+
 def get_random_batch(cfg: Namespace) -> torch.Tensor:
     return torch.randint(
         0, configs[cfg.model]["vocab_size"], (cfg.batch_size, cfg.context_window)
     )
 
 
+@nvtx.range("Forward Model")
 def forward(
     cfg: Namespace, model: BasicsTransformerLM, device: torch.device
 ) -> tuple[float, float]:
@@ -39,7 +80,8 @@ def forward(
     for _ in range(cfg.benchmark_steps):
         data = get_random_batch(cfg=cfg).to(device=device)
         start_time = timeit.default_timer()
-        _ = model(data)
+        with nvtx.range("Forward-Pass"):
+            _ = model(data)
         torch.cuda.synchronize()
         end_time = timeit.default_timer()
         times.append(end_time - start_time)
@@ -47,6 +89,7 @@ def forward(
     return np.average(times).item(), np.std(times).item()
 
 
+@nvtx.range("Forward-Backward Model")
 def forward_backward(
     cfg: Namespace, model: BasicsTransformerLM, device: torch.device
 ) -> tuple[float, float]:
@@ -64,9 +107,47 @@ def forward_backward(
         x = get_random_batch(cfg=cfg).to(device=device)
         y = get_random_batch(cfg=cfg).to(device=device)
         start_time = timeit.default_timer()
+        with nvtx.range("Forward-Pass"):
+            logits = model(x)
+            loss: torch.Tensor = criterion(logits, y)
+        with nvtx.range("Backward-Pass"):
+            loss.backward()
+        torch.cuda.synchronize()
+        end_time = timeit.default_timer()
+        times.append(end_time - start_time)
+
+    return np.average(times).item(), np.std(times).item()
+
+
+@nvtx.range("Forward-Backward-Optimizer Model")
+def forward_backward_optimizer(
+    cfg: Namespace, model: BasicsTransformerLM, device: torch.device
+) -> tuple[float, float]:
+    criterion = cross_entropy
+    optimizer = AdamW(model.parameters())
+    for _ in range(cfg.warmup_steps):
+        optimizer.zero()
+        x = get_random_batch(cfg=cfg).to(device=device)
+        y = get_random_batch(cfg=cfg).to(device=device)
         logits = model(x)
         loss: torch.Tensor = criterion(logits, y)
         loss.backward()
+        optimizer.step()
+        torch.cuda.synchronize()
+
+    times = []
+    for _ in range(cfg.benchmark_steps):
+        x = get_random_batch(cfg=cfg).to(device=device)
+        y = get_random_batch(cfg=cfg).to(device=device)
+        start_time = timeit.default_timer()
+        optimizer.zero()
+        with nvtx.range("Forward-Pass"):
+            logits = model(x)
+            loss: torch.Tensor = criterion(logits, y)
+        with nvtx.range("Backward-Pass"):
+            loss.backward()
+        with nvtx.range("Optimizer-Pass"):
+            optimizer.step()
         torch.cuda.synchronize()
         end_time = timeit.default_timer()
         times.append(end_time - start_time)
@@ -100,6 +181,12 @@ def benchmark(cfg: Namespace) -> None:
             avg_time, std = forward_backward(cfg=cfg, model=model, device=device)
             print(f"Average Forward and Backward computation time: {avg_time}")
             print(f"Std Forward and Backward computation time: {std}")
+        case "forward-backward-optimizer":
+            avg_time, std = forward_backward_optimizer(
+                cfg=cfg, model=model, device=device
+            )
+            print(f"Average Forward and Backward computation time: {avg_time}")
+            print(f"Std Forward and Backward computation time: {std}")
         case _:
             raise ValueError(f"Unknown Benchmarking type {cfg.type}")
 
@@ -108,7 +195,10 @@ def parse_args() -> Namespace:
     parser = argparse.ArgumentParser("Benchmark Model Script")
     parser.add_argument("--model", type=str, choices=configs.keys(), default="small")
     parser.add_argument(
-        "--type", type=str, choices=["forward", "forward-backward"], default="forward"
+        "--type",
+        type=str,
+        choices=["forward", "forward-backward", "forward-backward-optimizer"],
+        default="forward",
     )
 
     parser.add_argument("--warmup-steps", type=int, default=5)
