@@ -80,7 +80,7 @@ def validation(
     criterion,
     logger: WandbLogger,
     iteration: int,
-    device: torch.device,
+    device: torch.device,  # Remove this i think
 ):
     model.eval()
 
@@ -180,6 +180,9 @@ def train(cfg: Namespace) -> None:
         loss = criterion(logits, y)
         loss.backward()
         lr_schedule.step(t=step)
+
+        clip_gradients(model.parameters(), max_l2=cfg.gradient_clipping)
+
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -245,6 +248,8 @@ def parse_args() -> Namespace:
             "warmup": 100,
         },
     )
+
+    parser.add_argument("--gradient-clipping", type=float, default=1.5)
 
     parser.add_argument("--train-data-path", type=os.PathLike, default="data/")
     parser.add_argument("--val-data-path", type=os.PathLike, default="data/")
