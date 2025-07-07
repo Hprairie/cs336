@@ -36,7 +36,7 @@ log_cli_level = "WARNING"
 addopts = "-s"
 
 
-[tool.ruff]
+[tool.black]
 line-length = 120
 
 [tool.ruff.lint.extend-per-file-ignores]
