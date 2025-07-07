@@ -126,7 +126,7 @@ def forward_backward_optimizer(
     criterion = cross_entropy
     optimizer = AdamW(model.parameters())
     for _ in range(cfg.warmup_steps):
-        optimizer.zero()
+        optimizer.zero_grad()
         x = get_random_batch(cfg=cfg).to(device=device)
         y = get_random_batch(cfg=cfg).to(device=device)
         logits = model(x)
@@ -140,7 +140,43 @@ def forward_backward_optimizer(
         x = get_random_batch(cfg=cfg).to(device=device)
         y = get_random_batch(cfg=cfg).to(device=device)
         start_time = timeit.default_timer()
-        optimizer.zero()
+        optimizer.zero_grad()
+        with nvtx.range("Forward-Pass"):
+            logits = model(x)
+            loss: torch.Tensor = criterion(logits, y)
+        with nvtx.range("Backward-Pass"):
+            loss.backward()
+        with nvtx.range("Optimizer-Pass"):
+            optimizer.step()
+        torch.cuda.synchronize()
+        end_time = timeit.default_timer()
+        times.append(end_time - start_time)
+
+    return np.average(times).item(), np.std(times).item()
+
+
+@nvtx.range("Forward-Backward-Optimizer Mixed Model")
+def forward_backward_optimizer(
+    cfg: Namespace, model: BasicsTransformerLM, device: torch.device
+) -> tuple[float, float]:
+    criterion = cross_entropy
+    optimizer = AdamW(model.parameters())
+    for _ in range(cfg.warmup_steps):
+        optimizer.zero_grad()
+        x = get_random_batch(cfg=cfg).to(device=device)
+        y = get_random_batch(cfg=cfg).to(device=device)
+        logits = model(x)
+        loss: torch.Tensor = criterion(logits, y)
+        loss.backward()
+        optimizer.step()
+        torch.cuda.synchronize()
+
+    times = []
+    for _ in range(cfg.benchmark_steps):
+        x = get_random_batch(cfg=cfg).to(device=device)
+        y = get_random_batch(cfg=cfg).to(device=device)
+        start_time = timeit.default_timer()
+        optimizer.zero_grad()
         with nvtx.range("Forward-Pass"):
             logits = model(x)
             loss: torch.Tensor = criterion(logits, y)
@@ -198,7 +234,7 @@ def parse_args() -> Namespace:
         "--type",
         type=str,
         choices=["forward", "forward-backward", "forward-backward-optimizer"],
-        default="forward",
+        default="forward-backward-optimizer",
     )
 
     parser.add_argument("--warmup-steps", type=int, default=5)
