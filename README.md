@@ -9,7 +9,9 @@ Most assignments have a compute costly / compute minimal costs. Everything is im
 
 ### TODO:
 
-- [ ] Assignment 1: Building a Transformer LM
+I am skipping major experiments for now as it takes to long on a laptop. I.e. 1.7
+
+- [x] Assignment 1: Building a Transformer LM  // Marking as done for now as experiments not really feasible
     - [x] Part 1: Traing BPE
     - [x] Part 2: Tokenizer
     - [x] Part 3: Language Model
@@ -18,3 +20,7 @@ Most assignments have a compute costly / compute minimal costs. Everything is im
     - [x] Part 6: Generating Text
     - [ ] Part 7: Experiments
 - [ ] Assignment 2: Systems and Parallelism
+    - [ ] Part 1: Benchmarking Script
+    - [ ] Part 2: Flash Attention 2 Triton Implementation
+    - [ ] Part 3: Implement DDP
+    - [ ] Part 4: Optimizer Sharding
